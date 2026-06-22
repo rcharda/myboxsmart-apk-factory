@@ -1,0 +1,349 @@
+name: Build APK Revendeur
+
+on:
+  workflow_dispatch:
+    inputs:
+      reseller_id:
+        description: 'ID du revendeur (ex: FASO-X7K2P)'
+        required: true
+        default: 'RESELLER'
+      app_name:
+        description: "Nom de l'application (affiché sous l'icône)"
+        required: true
+        default: 'My Box Smart'
+      pkg_name:
+        description: 'Package Android (ex: com.fasosmart.tv)'
+        required: true
+        default: 'com.myboxsmart.tv'
+      version_name:
+        description: 'Version (ex: 1.0.0)'
+        required: false
+        default: '1.0.0'
+      html_b64:
+        description: 'HTML encodé base64 (partie 1/3)'
+        required: false
+        default: ''
+      html_b64_2:
+        description: 'HTML encodé base64 (partie 2/3)'
+        required: false
+        default: ''
+      html_b64_3:
+        description: 'HTML encodé base64 (partie 3/3)'
+        required: false
+        default: ''
+      logo_b64:
+        description: 'Logo PNG encodé base64'
+        required: false
+        default: ''
+      whatsapp:
+        description: 'Numéro WhatsApp du revendeur (+226...)'
+        required: false
+        default: ''
+      app_color:
+        description: 'Couleur principale (#e50914)'
+        required: false
+        default: '#e50914'
+      slogan:
+        description: 'Slogan affiché sur la page accueil'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ─── 1. Checkout du repo ───────────────────────────────────────────
+      - name: 📦 Checkout
+        uses: actions/checkout@v4
+
+      # ─── 2. Java 17 ───────────────────────────────────────────────────
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ─── 3. Installer apktool ─────────────────────────────────────────
+      - name: 🔧 Installer APKTool
+        run: |
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          chmod +x /usr/local/bin/apktool
+          apktool --version
+
+      # ─── 4. Installer uber-apk-signer ────────────────────────────────
+      - name: 🔏 Installer uber-apk-signer
+        run: |
+          wget -q https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar -O uber-apk-signer.jar
+
+      # ─── 5. Restaurer le Keystore depuis les Secrets ─────────────────
+      - name: 🔑 Restaurer le Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > mybox.jks
+          ls -lh mybox.jks
+
+      # ─── 6. Décompiler l'APK de base ─────────────────────────────────
+      - name: 📂 Décompiler APK de base
+        run: |
+          # L'APK de base doit être à la racine du repo
+          if [ ! -f "My_Box_Smart_FINAL.apk" ]; then
+            echo "❌ My_Box_Smart_FINAL.apk introuvable à la racine du repo"
+            exit 1
+          fi
+          apktool d My_Box_Smart_FINAL.apk -o apk_decompiled -f
+          echo "✅ APK décompilé"
+          ls apk_decompiled/
+
+      # ─── 7. Reconstruire le HTML et l'injecter ────────────────────────
+      - name: 📄 Injecter le HTML personnalisé
+        run: |
+          python3 << 'PYEOF'
+          import base64, os, sys, re
+
+          reseller_id  = os.environ.get('RESELLER_ID',  'RESELLER')
+          app_name     = os.environ.get('APP_NAME',     'My Box Smart')
+          whatsapp     = os.environ.get('WHATSAPP',     '')
+          app_color    = os.environ.get('APP_COLOR',    '#e50914')
+          slogan       = os.environ.get('SLOGAN',       '')
+
+          # Reconstituire le HTML (3 parties)
+          b64_1 = os.environ.get('HTML_B64',   '')
+          b64_2 = os.environ.get('HTML_B64_2', '')
+          b64_3 = os.environ.get('HTML_B64_3', '')
+          html_b64 = b64_1 + b64_2 + b64_3
+
+          if html_b64.strip():
+              try:
+                  # Padding
+                  missing = len(html_b64) % 4
+                  if missing: html_b64 += '=' * (4 - missing)
+                  html = base64.b64decode(html_b64).decode('utf-8')
+                  print(f"✅ HTML décodé : {len(html)} caractères")
+              except Exception as e:
+                  print(f"⚠️ Erreur décode HTML : {e} — utilisation du HTML existant")
+                  html = None
+          else:
+              print("ℹ️ Pas de HTML fourni — utilisation du fichier existant dans le repo")
+              html = None
+
+          # Si pas de HTML fourni, lire le fichier existant dans l'APK décompilé
+          asset_path = 'apk_decompiled/assets/index.html'
+          if not html:
+              if os.path.exists(asset_path):
+                  with open(asset_path, 'r', encoding='utf-8') as f:
+                      html = f.read()
+                  print(f"📖 HTML existant lu : {len(html)} caractères")
+              else:
+                  # Créer un HTML minimal loader
+                  html = '''<!DOCTYPE html>
+          <html><head><meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>{app_name}</title>
+          <style>body{{background:#0D1B2A;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px;}}
+          .logo{{font-size:48px;}} .name{{font-size:24px;font-weight:700;color:{app_color};}}
+          .sub{{font-size:14px;color:#888;}}</style></head>
+          <body><div class="logo">📺</div><div class="name">{app_name}</div>
+          <div class="sub">{slogan}</div></body></html>'''.format(
+                      app_name=app_name, app_color=app_color, slogan=slogan or 'Chargement...'
+                  )
+                  print("⚠️ Aucun HTML trouvé — HTML minimal créé")
+
+          # ── Injection des variables revendeur ──
+          replacements = [
+              (r"const RESELLER_ID\s*=\s*'[^']*'",       f"const RESELLER_ID = '{reseller_id}'"),
+              (r"const APP_NAME\s*=\s*'[^']*'",           f"const APP_NAME = '{app_name}'"),
+              (r"const WHATSAPP_NUMBER\s*=\s*'[^']*'",    f"const WHATSAPP_NUMBER = '{whatsapp}'"),
+              (r"const APP_COLOR\s*=\s*'[^']*'",          f"const APP_COLOR = '{app_color}'"),
+              (r"const APP_SLOGAN\s*=\s*'[^']*'",         f"const APP_SLOGAN = '{slogan}'"),
+              (r"const RESELLER_LOGO\s*=\s*'[^']*'",      f"const RESELLER_LOGO = ''"),
+          ]
+          for pattern, replacement in replacements:
+              html, n = re.subn(pattern, replacement, html)
+              if n: print(f"  🔧 {replacement[:60]}")
+
+          # Remplacer les liens wa.me si WhatsApp fourni
+          if whatsapp:
+              wa_num = whatsapp.replace('+','').replace(' ','')
+              html = re.sub(r'wa\.me/\+?[\d]+', f'wa.me/{wa_num}', html)
+              print(f"  📱 WhatsApp → wa.me/{wa_num}")
+
+          # Écrire le HTML final
+          os.makedirs('apk_decompiled/assets', exist_ok=True)
+          with open(asset_path, 'w', encoding='utf-8') as f:
+              f.write(html)
+          print(f"✅ HTML injecté dans {asset_path}")
+          PYEOF
+        env:
+          RESELLER_ID:  ${{ inputs.reseller_id }}
+          APP_NAME:     ${{ inputs.app_name }}
+          WHATSAPP:     ${{ inputs.whatsapp }}
+          APP_COLOR:    ${{ inputs.app_color }}
+          SLOGAN:       ${{ inputs.slogan }}
+          HTML_B64:     ${{ inputs.html_b64 }}
+          HTML_B64_2:   ${{ inputs.html_b64_2 }}
+          HTML_B64_3:   ${{ inputs.html_b64_3 }}
+
+      # ─── 8. Modifier AndroidManifest.xml ─────────────────────────────
+      - name: 📝 Modifier AndroidManifest.xml
+        run: |
+          python3 << 'PYEOF'
+          import re, os
+
+          manifest_path = 'apk_decompiled/AndroidManifest.xml'
+          app_name = os.environ.get('APP_NAME', 'My Box Smart')
+          pkg_name = os.environ.get('PKG_NAME', 'com.myboxsmart.tv')
+          version  = os.environ.get('VERSION_NAME', '1.0.0')
+
+          with open(manifest_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          # Remplacer le package
+          old_pkg_match = re.search(r'package="([^"]+)"', content)
+          if old_pkg_match:
+              old_pkg = old_pkg_match.group(1)
+              content = content.replace(f'package="{old_pkg}"', f'package="{pkg_name}"')
+              # Remplacer toutes les occurrences de l'ancien package dans les autorités
+              content = content.replace(old_pkg, pkg_name)
+              print(f"✅ Package : {old_pkg} → {pkg_name}")
+
+          # Modifier le versionName
+          content = re.sub(r'android:versionName="[^"]*"', f'android:versionName="{version}"', content)
+
+          with open(manifest_path, 'w', encoding='utf-8') as f:
+              f.write(content)
+          print("✅ AndroidManifest.xml mis à jour")
+          PYEOF
+        env:
+          APP_NAME:     ${{ inputs.app_name }}
+          PKG_NAME:     ${{ inputs.pkg_name }}
+          VERSION_NAME: ${{ inputs.version_name }}
+
+      # ─── 9. Modifier strings.xml (nom de l'app) ──────────────────────
+      - name: 📝 Modifier strings.xml
+        run: |
+          python3 << 'PYEOF'
+          import os, re, glob
+
+          app_name = os.environ.get('APP_NAME', 'My Box Smart')
+
+          # Trouver tous les strings.xml
+          for strings_file in glob.glob('apk_decompiled/res/values*/strings.xml'):
+              with open(strings_file, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              # Remplacer app_name
+              new_content = re.sub(
+                  r'(<string name="app_name">)[^<]*(</string>)',
+                  rf'\g<1>{app_name}\2',
+                  content
+              )
+              if new_content != content:
+                  with open(strings_file, 'w', encoding='utf-8') as f:
+                      f.write(new_content)
+                  print(f"✅ strings.xml mis à jour : {strings_file} → {app_name}")
+          PYEOF
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+
+      # ─── 10. Injecter le logo ─────────────────────────────────────────
+      - name: 🖼️ Injecter le Logo
+        run: |
+          python3 << 'PYEOF'
+          import base64, os, glob, shutil
+
+          logo_b64 = os.environ.get('LOGO_B64', '')
+          if not logo_b64.strip():
+              print("ℹ️ Pas de logo fourni — conservation du logo existant")
+              exit(0)
+
+          try:
+              missing = len(logo_b64) % 4
+              if missing: logo_b64 += '=' * (4 - missing)
+              logo_bytes = base64.b64decode(logo_b64)
+
+              # Remplacer dans toutes les densités
+              icon_paths = glob.glob('apk_decompiled/res/mipmap-*/ic_launcher.png')
+              icon_paths += glob.glob('apk_decompiled/res/drawable*/ic_launcher.png')
+              if not icon_paths:
+                  # Chercher n'importe quel PNG dans mipmap
+                  icon_paths = glob.glob('apk_decompiled/res/mipmap-*/*.png')
+
+              for icon_path in icon_paths:
+                  with open(icon_path, 'wb') as f:
+                      f.write(logo_bytes)
+                  print(f"  ✅ Logo injecté : {icon_path}")
+
+              if not icon_paths:
+                  # Créer dans mipmap-xxxhdpi
+                  os.makedirs('apk_decompiled/res/mipmap-xxxhdpi', exist_ok=True)
+                  with open('apk_decompiled/res/mipmap-xxxhdpi/ic_launcher.png', 'wb') as f:
+                      f.write(logo_bytes)
+                  print("✅ Logo créé dans mipmap-xxxhdpi")
+
+          except Exception as e:
+              print(f"⚠️ Erreur logo : {e} — conservation du logo existant")
+          PYEOF
+        env:
+          LOGO_B64: ${{ inputs.logo_b64 }}
+
+      # ─── 11. Recompiler l'APK ─────────────────────────────────────────
+      - name: 🔨 Recompiler l'APK
+        run: |
+          APP_NAME="${{ inputs.app_name }}"
+          SAFE_NAME=$(echo "$APP_NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          apktool b apk_decompiled -o "${SAFE_NAME}_unsigned.apk" --use-aapt2
+          echo "✅ APK recompilé : ${SAFE_NAME}_unsigned.apk"
+          ls -lh "${SAFE_NAME}_unsigned.apk"
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
+      # ─── 12. Zipalign ─────────────────────────────────────────────────
+      - name: 📐 Zipalign
+        run: |
+          # zipalign est inclus dans les build-tools Android SDK sur ubuntu-latest
+          ZIPALIGN=$(find /usr -name zipalign 2>/dev/null | head -1)
+          if [ -z "$ZIPALIGN" ]; then
+            # Installer via sdkmanager si nécessaire
+            echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" > /dev/null 2>&1
+            ZIPALIGN="$ANDROID_HOME/build-tools/34.0.0/zipalign"
+          fi
+          $ZIPALIGN -v 4 "${SAFE_NAME}_unsigned.apk" "${SAFE_NAME}_aligned.apk"
+          echo "✅ Zipalign OK"
+
+      # ─── 13. Signer l'APK ─────────────────────────────────────────────
+      - name: 🔏 Signer l'APK
+        run: |
+          java -jar uber-apk-signer.jar \
+            --apks "${SAFE_NAME}_aligned.apk" \
+            --ks mybox.jks \
+            --ksAlias mybox \
+            --ksKeyPass "${{ secrets.KEY_PASSWORD }}" \
+            --ksPass "${{ secrets.STORE_PASSWORD }}" \
+            --out ./signed/
+          echo "✅ APK signé"
+          ls -lh signed/
+
+      # ─── 14. Upload l'APK comme Artifact ──────────────────────────────
+      - name: 📤 Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: APK-${{ inputs.reseller_id }}-v${{ inputs.version_name }}
+          path: signed/*.apk
+          retention-days: 30
+
+      # ─── 15. Résumé ───────────────────────────────────────────────────
+      - name: 📊 Résumé du Build
+        run: |
+          echo "## ✅ Build APK Réussi" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Champ | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Revendeur | ${{ inputs.reseller_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| App Name | ${{ inputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | ${{ inputs.pkg_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ inputs.version_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| WhatsApp | ${{ inputs.whatsapp }} |" >> $GITHUB_STEP_SUMMARY
+          APK_SIZE=$(ls -lh signed/*.apk 2>/dev/null | awk '{print $5}')
+          echo "| Taille APK | $APK_SIZE |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📥 **Télécharge l'APK dans la section Artifacts ci-dessous**" >> $GITHUB_STEP_SUMMARY
